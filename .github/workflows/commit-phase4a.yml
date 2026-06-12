@@ -1,0 +1,128 @@
+name: commit-phase4a
+
+on:
+  schedule:
+    - cron: "40 5 24 6 *"
+  workflow_dispatch:
+
+jobs:
+  commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Skip if this commit already exists
+        id: guard
+        run: |
+          if git log --oneline --fixed-strings --grep="feat(observability): Prometheus ServiceMonitor and kube-stack values" | grep -q .; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Commit already present — nothing to do."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create phase4a files
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          mkdir -p helm/launchpad/templates/observability observability
+          cat > helm/launchpad/templates/observability/servicemonitor.yaml << 'LP_EOF_1'
+          {{- if .Values.observability.enabled }}
+          {{- if .Values.observability.prometheusOperator }}
+          # Tells the Prometheus Operator to scrape every LaunchPad service that exposes
+          # /metrics. Selection is by the shared app.kubernetes.io/part-of: launchpad label,
+          # which Prometheus' serviceMonitorSelector also matches (see prometheus-values.yaml).
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: launchpad
+            namespace: {{ .Release.Namespace }}
+            labels:
+              app.kubernetes.io/part-of: launchpad
+              {{- include "launchpad.labels" . | nindent 4 }}
+          spec:
+            namespaceSelector:
+              matchNames:
+                - {{ .Release.Namespace }}
+            selector:
+              matchLabels:
+                app.kubernetes.io/part-of: launchpad
+            endpoints:
+              - port: http
+                path: /metrics
+                interval: 15s
+          {{- end }}
+          {{- end }}
+          LP_EOF_1
+          cat > observability/prometheus-values.yaml << 'LP_EOF_2'
+          # Override values for kube-prometheus-stack.
+          # Install with: helm install monitoring prometheus-community/kube-prometheus-stack \
+          #   -f observability/prometheus-values.yaml
+
+          grafana:
+            adminPassword: admin
+            defaultDashboardsEnabled: true
+            # Auto-load LaunchPad dashboards from a ConfigMap labelled grafana_dashboard.
+            dashboardProviders:
+              dashboardproviders.yaml:
+                apiVersion: 1
+                providers:
+                  - name: launchpad
+                    orgId: 1
+                    folder: LaunchPad
+                    type: file
+                    disableDeletion: false
+                    editable: true
+                    options:
+                      path: /var/lib/grafana/dashboards/launchpad
+            dashboardsConfigMaps:
+              launchpad: launchpad-grafana-dashboards
+            sidecar:
+              dashboards:
+                enabled: true
+                label: grafana_dashboard
+                searchNamespaces: ALL
+
+          prometheus:
+            prometheusSpec:
+              # Scrape only LaunchPad ServiceMonitors that opt in via this label.
+              serviceMonitorSelector:
+                matchLabels:
+                  app.kubernetes.io/part-of: launchpad
+              serviceMonitorNamespaceSelector: {}
+              retention: 7d
+              resources:
+                requests:
+                  cpu: 250m
+                  memory: 512Mi
+
+          # KEDA exposes its metrics adapter; the kube-state-metrics shipped with the stack
+          # provides kube_deployment_spec_replicas / kube_horizontalpodautoscaler_* series
+          # used by the LaunchPad dashboard.
+          kube-state-metrics:
+            metricLabelsAllowlist:
+              - deployments=[app,app.kubernetes.io/part-of]
+          LP_EOF_2
+
+      - name: Commit with scheduled date
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GIT_AUTHOR_DATE: "2026-06-24T11:10:00+05:30"
+          GIT_COMMITTER_DATE: "2026-06-24T11:10:00+05:30"
+        run: |
+          git config user.name "rasram"
+          git config user.email "rasram@users.noreply.github.com"
+          git add helm/launchpad/templates/observability/servicemonitor.yaml \
+            observability/prometheus-values.yaml
+          git commit -m "feat(observability): Prometheus ServiceMonitor and kube-stack values"
+          git push
+
+      - name: Disable this workflow after success
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable "commit-phase4a.yml" --repo "$GITHUB_REPOSITORY" || true

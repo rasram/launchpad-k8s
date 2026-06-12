@@ -1,0 +1,103 @@
+name: commit-phase3a
+
+on:
+  schedule:
+    - cron: "20 4 20 6 *"
+  workflow_dispatch:
+
+jobs:
+  commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Skip if this commit already exists
+        id: guard
+        run: |
+          if git log --oneline --fixed-strings --grep="feat(gitops): ArgoCD Application with auto-sync and self-heal" | grep -q .; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Commit already present — nothing to do."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create phase3a files
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          mkdir -p argocd
+          cat > argocd/project.yaml << 'LP_EOF_1'
+          apiVersion: argoproj.io/v1alpha1
+          kind: AppProject
+          metadata:
+            name: launchpad
+            namespace: argocd
+          spec:
+            description: LaunchPad deployment project
+            sourceRepos:
+              - https://github.com/rasram/launchpad-k8s
+            destinations:
+              - namespace: launchpad
+                server: https://kubernetes.default.svc
+            clusterResourceWhitelist:
+              - group: '*'
+                kind: '*'
+          LP_EOF_1
+          cat > argocd/application.yaml << 'LP_EOF_2'
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: launchpad
+            namespace: argocd
+            annotations:
+              # ──────────────────────────────────────────────────────────────────────
+              # This Application definition is the ONLY way to deploy LaunchPad.
+              # kubectl apply in production is forbidden.
+              #   Deploy  : edit a values file -> git commit -> ArgoCD auto-syncs.
+              #   Rollback: git revert -> ArgoCD syncs the previous state.
+              #   Drift   : manual kubectl changes are reverted automatically (selfHeal).
+              # The cluster's desired state lives in git, not in a CI pipeline.
+              # ──────────────────────────────────────────────────────────────────────
+              argocd.argoproj.io/sync-wave: "0"
+          spec:
+            project: launchpad
+            source:
+              repoURL: https://github.com/rasram/launchpad-k8s
+              targetRevision: main
+              path: helm/launchpad
+              helm:
+                valueFiles:
+                  - values.yaml
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: launchpad
+            syncPolicy:
+              automated:
+                prune: true      # Delete resources removed from git
+                selfHeal: true   # Revert manual kubectl changes
+              syncOptions:
+                - CreateNamespace=true
+          LP_EOF_2
+
+      - name: Commit with scheduled date
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GIT_AUTHOR_DATE: "2026-06-20T09:50:00+05:30"
+          GIT_COMMITTER_DATE: "2026-06-20T09:50:00+05:30"
+        run: |
+          git config user.name "rasram"
+          git config user.email "rasram@users.noreply.github.com"
+          git add argocd/project.yaml \
+            argocd/application.yaml
+          git commit -m "feat(gitops): ArgoCD Application with auto-sync and self-heal"
+          git push
+
+      - name: Disable this workflow after success
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable "commit-phase3a.yml" --repo "$GITHUB_REPOSITORY" || true

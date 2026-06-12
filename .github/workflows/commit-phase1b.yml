@@ -1,0 +1,92 @@
+name: commit-phase1b
+
+on:
+  schedule:
+    - cron: "45 8 14 6 *"
+  workflow_dispatch:
+
+jobs:
+  commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Skip if this commit already exists
+        id: guard
+        run: |
+          if git log --oneline --fixed-strings --grep="chore: add .gitignore, base values, and prod overlay" | grep -q .; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Commit already present — nothing to do."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create phase1b files
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          mkdir -p helm/launchpad
+          cat > helm/launchpad/values.prod.yaml << 'LP_EOF_1'
+          # Production overrides — more replicas, stricter limits, aggressive KEDA.
+          global:
+            environment: prod
+
+          uploadService:
+            replicaCount: 3
+            resources:
+              limits:
+                cpu: 1000m
+                memory: 512Mi
+            hpa:
+              minReplicas: 3
+              maxReplicas: 20
+
+          buildWorker:
+            keda:
+              maxReplicaCount: 20
+              lagThreshold: "3"      # More aggressive in prod
+
+          routerService:
+            replicaCount: 5
+
+          ingress:
+            host: launchpad.example.com
+            tls:
+              clusterIssuer: letsencrypt-prod
+
+          config:
+            logLevel: warn
+          LP_EOF_1
+          cat > .gitignore << 'LP_EOF_2'
+          charts/
+          *.lock
+          kubeconfig
+          *.pem
+          .env
+          .env.*
+          !.env.example
+          private-key*
+          LP_EOF_2
+
+      - name: Commit with scheduled date
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GIT_AUTHOR_DATE: "2026-06-14T14:15:00+05:30"
+          GIT_COMMITTER_DATE: "2026-06-14T14:15:00+05:30"
+        run: |
+          git config user.name "rasram"
+          git config user.email "rasram@users.noreply.github.com"
+          git add helm/launchpad/values.prod.yaml \
+            .gitignore
+          git commit -m "chore: add .gitignore, base values, and prod overlay"
+          git push
+
+      - name: Disable this workflow after success
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable "commit-phase1b.yml" --repo "$GITHUB_REPOSITORY" || true

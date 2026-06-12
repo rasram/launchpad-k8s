@@ -1,0 +1,132 @@
+name: commit-phase5a
+
+on:
+  schedule:
+    - cron: "50 4 30 6 *"
+  workflow_dispatch:
+
+jobs:
+  commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Pushing files under .github/workflows/ requires a PAT with
+          # the workflow scope — the default GITHUB_TOKEN is not allowed to.
+          token: ${{ secrets.WORKFLOW_PAT || github.token }}
+
+      - name: Skip if this commit already exists
+        id: guard
+        run: |
+          if git log --oneline --fixed-strings --grep="ci: Helm lint and kubectl dry-run on push and PR" | grep -q .; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Commit already present — nothing to do."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create phase5a files
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          mkdir -p .github/workflows
+          cat > .github/workflows/lint.yml << 'LP_EOF_1'
+          name: Helm Lint + K8s Dry Run
+
+          on: [push, pull_request]
+
+          jobs:
+            lint:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+
+                - uses: azure/setup-helm@v4
+
+                - name: Resolve chart dependencies
+                  run: |
+                    helm repo add bitnami https://charts.bitnami.com/bitnami
+                    helm repo update
+                    helm dependency build helm/launchpad
+
+                - name: Helm lint (all environments)
+                  run: |
+                    helm lint helm/launchpad -f helm/launchpad/values.yaml
+                    helm lint helm/launchpad -f helm/launchpad/values.staging.yaml
+                    helm lint helm/launchpad -f helm/launchpad/values.prod.yaml
+
+                - name: Helm template dry-run
+                  run: |
+                    helm template launchpad helm/launchpad > /tmp/rendered.yaml
+                    helm template launchpad helm/launchpad -f helm/launchpad/values.staging.yaml > /dev/null
+                    helm template launchpad helm/launchpad -f helm/launchpad/values.prod.yaml > /dev/null
+
+                - name: Validate rendered manifests (kubeconform)
+                  run: |
+                    # No cluster on the runner, so kubectl --dry-run=client cannot resolve
+                    # CRD mappings (ScaledObject, KafkaTopic, ServiceMonitor). kubeconform
+                    # validates offline against schemas and is the authoritative gate here.
+                    curl -sSL -o /tmp/kubeconform.tar.gz \
+                      https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz
+                    tar -xzf /tmp/kubeconform.tar.gz -C /tmp
+                    /tmp/kubeconform -strict -summary -ignore-missing-schemas /tmp/rendered.yaml
+
+                - name: kubectl apply dry-run (informational)
+                  continue-on-error: true
+                  run: |
+                    kubectl apply --dry-run=client --validate=false -f /tmp/rendered.yaml || true
+          LP_EOF_1
+          cat > .github/workflows/deploy.yml << 'LP_EOF_2'
+          name: ArgoCD Sync on merge to main
+
+          on:
+            push:
+              branches: [main]
+
+          # ArgoCD already auto-syncs (syncPolicy.automated); this forces an immediate
+          # sync on merge instead of waiting for the poll interval. It no-ops gracefully
+          # when the ArgoCD server secrets are not configured.
+          jobs:
+            sync:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+
+                - name: Trigger ArgoCD sync
+                  env:
+                    ARGOCD_SERVER: __EXPR_OPEN__ secrets.ARGOCD_SERVER }}
+                    ARGOCD_AUTH_TOKEN: __EXPR_OPEN__ secrets.ARGOCD_TOKEN }}
+                  run: |
+                    if [ -z "$ARGOCD_SERVER" ] || [ -z "$ARGOCD_AUTH_TOKEN" ]; then
+                      echo "ARGOCD_SERVER / ARGOCD_TOKEN not configured — relying on ArgoCD auto-sync."
+                      exit 0
+                    fi
+                    curl -sSL -o /usr/local/bin/argocd \
+                      https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+                    chmod +x /usr/local/bin/argocd
+                    argocd app sync launchpad --grpc-web
+                    argocd app wait launchpad --health --grpc-web --timeout 300
+          LP_EOF_2
+          perl -pi -e 's/__EXPR_OPEN__/\$\{\{/g' .github/workflows/deploy.yml
+
+      - name: Commit with scheduled date
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GIT_AUTHOR_DATE: "2026-06-30T10:20:00+05:30"
+          GIT_COMMITTER_DATE: "2026-06-30T10:20:00+05:30"
+        run: |
+          git config user.name "rasram"
+          git config user.email "rasram@users.noreply.github.com"
+          git add .github/workflows/lint.yml \
+            .github/workflows/deploy.yml
+          git commit -m "ci: Helm lint and kubectl dry-run on push and PR"
+          git push
+
+      - name: Disable this workflow after success
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable "commit-phase5a.yml" --repo "$GITHUB_REPOSITORY" || true

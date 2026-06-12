@@ -1,0 +1,157 @@
+name: commit-phase2a
+
+on:
+  schedule:
+    - cron: "30 5 16 6 *"
+  workflow_dispatch:
+
+jobs:
+  commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Skip if this commit already exists
+        id: guard
+        run: |
+          if git log --oneline --fixed-strings --grep="feat(k8s): upload-service deployment with health probes and HPA" | grep -q .; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Commit already present — nothing to do."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create phase2a files
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          mkdir -p helm/launchpad/templates/upload-service
+          cat > helm/launchpad/templates/upload-service/deployment.yaml << 'LP_EOF_1'
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: upload-service
+            namespace: {{ .Release.Namespace }}
+            labels:
+              app: upload-service
+              {{- include "launchpad.labels" . | nindent 4 }}
+          spec:
+            replicas: {{ .Values.uploadService.replicaCount }}
+            selector:
+              matchLabels:
+                app: upload-service
+            template:
+              metadata:
+                labels:
+                  app: upload-service
+                  {{- include "launchpad.labels" . | nindent 8 }}
+              spec:
+                containers:
+                  - name: upload-service
+                    image: "{{ .Values.global.imageRegistry }}/{{ .Values.uploadService.image.repository }}:{{ .Values.uploadService.image.tag }}"
+                    imagePullPolicy: IfNotPresent
+                    ports:
+                      - name: http
+                        containerPort: {{ .Values.uploadService.port }}
+                    envFrom:
+                      - configMapRef:
+                          name: launchpad-config
+                      - secretRef:
+                          name: launchpad-secrets
+                    # Stateless HTTP service — readiness gates traffic, liveness restarts hung pods.
+                    readinessProbe:
+                      httpGet:
+                        path: /health
+                        port: http
+                      periodSeconds: 10
+                      failureThreshold: 3
+                    livenessProbe:
+                      httpGet:
+                        path: /health
+                        port: http
+                      periodSeconds: 30
+                      failureThreshold: 3
+                    resources:
+                      {{- toYaml .Values.uploadService.resources | nindent 12 }}
+                # Spread replicas across zones so a single AZ failure cannot take the service down.
+                topologySpreadConstraints:
+                  - maxSkew: 1
+                    topologyKey: topology.kubernetes.io/zone
+                    whenUnsatisfiable: ScheduleAnyway
+                    labelSelector:
+                      matchLabels:
+                        app: upload-service
+          LP_EOF_1
+          cat > helm/launchpad/templates/upload-service/service.yaml << 'LP_EOF_2'
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: upload-service
+            namespace: {{ .Release.Namespace }}
+            labels:
+              app: upload-service
+              {{- include "launchpad.labels" . | nindent 4 }}
+          spec:
+            type: ClusterIP
+            selector:
+              app: upload-service
+            ports:
+              - name: http
+                port: {{ .Values.uploadService.port }}
+                targetPort: http
+          LP_EOF_2
+          cat > helm/launchpad/templates/upload-service/hpa.yaml << 'LP_EOF_3'
+          {{- if .Values.uploadService.hpa.enabled }}
+          # CPU-based HorizontalPodAutoscaler — the CORRECT choice for upload-service.
+          # upload-service is a stateless HTTP handler: request volume tracks CPU, so CPU
+          # utilization is a faithful proxy for load. Contrast with build-worker, which is
+          # an event consumer idle at ~0% CPU even with a deep queue — there we use a KEDA
+          # ScaledObject driven by Kafka consumer lag instead (see build-worker/scaledobject.yaml).
+          apiVersion: autoscaling/v2
+          kind: HorizontalPodAutoscaler
+          metadata:
+            name: upload-service
+            namespace: {{ .Release.Namespace }}
+            labels:
+              app: upload-service
+              {{- include "launchpad.labels" . | nindent 4 }}
+          spec:
+            scaleTargetRef:
+              apiVersion: apps/v1
+              kind: Deployment
+              name: upload-service
+            minReplicas: {{ .Values.uploadService.hpa.minReplicas }}
+            maxReplicas: {{ .Values.uploadService.hpa.maxReplicas }}
+            metrics:
+              - type: Resource
+                resource:
+                  name: cpu
+                  target:
+                    type: Utilization
+                    averageUtilization: {{ .Values.uploadService.hpa.targetCPUUtilizationPercentage }}
+          {{- end }}
+          LP_EOF_3
+
+      - name: Commit with scheduled date
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GIT_AUTHOR_DATE: "2026-06-16T11:00:00+05:30"
+          GIT_COMMITTER_DATE: "2026-06-16T11:00:00+05:30"
+        run: |
+          git config user.name "rasram"
+          git config user.email "rasram@users.noreply.github.com"
+          git add helm/launchpad/templates/upload-service/deployment.yaml \
+            helm/launchpad/templates/upload-service/service.yaml \
+            helm/launchpad/templates/upload-service/hpa.yaml
+          git commit -m "feat(k8s): upload-service deployment with health probes and HPA"
+          git push
+
+      - name: Disable this workflow after success
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable "commit-phase2a.yml" --repo "$GITHUB_REPOSITORY" || true

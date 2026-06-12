@@ -1,0 +1,543 @@
+name: commit-phase4b
+
+on:
+  schedule:
+    - cron: "15 8 26 6 *"
+  workflow_dispatch:
+
+jobs:
+  commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Skip if this commit already exists
+        id: guard
+        run: |
+          if git log --oneline --fixed-strings --grep="feat(observability): Grafana dashboard for KEDA lag correlation" | grep -q .; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Commit already present — nothing to do."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create phase4b files
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          mkdir -p helm/launchpad/dashboards helm/launchpad/templates/observability observability/dashboards
+          cat > observability/dashboards/launchpad-keda.json << 'LP_EOF_1'
+          {
+            "annotations": {
+              "list": [
+                {
+                  "builtIn": 1,
+                  "datasource": { "type": "datasource", "uid": "grafana" },
+                  "enable": true,
+                  "hide": true,
+                  "iconColor": "rgba(0, 211, 255, 1)",
+                  "name": "Annotations & Alerts",
+                  "type": "dashboard"
+                }
+              ]
+            },
+            "description": "Correlates KEDA-driven build-worker pod scaling with Kafka consumer lag. Proves lag — not CPU — is the scaling signal, and that scale-to-zero works.",
+            "editable": true,
+            "fiscalYearStartMonth": 0,
+            "graphTooltip": 1,
+            "links": [],
+            "liveNow": false,
+            "refresh": "10s",
+            "schemaVersion": 39,
+            "tags": ["launchpad", "keda", "autoscaling"],
+            "templating": {
+              "list": [
+                {
+                  "current": {},
+                  "hide": 0,
+                  "includeAll": false,
+                  "label": "Prometheus",
+                  "multi": false,
+                  "name": "datasource",
+                  "options": [],
+                  "query": "prometheus",
+                  "refresh": 1,
+                  "regex": "",
+                  "skipUrlSync": false,
+                  "type": "datasource"
+                }
+              ]
+            },
+            "time": { "from": "now-30m", "to": "now" },
+            "timepicker": {},
+            "timezone": "",
+            "title": "LaunchPad — KEDA Lag vs Pod Scaling",
+            "uid": "launchpad-keda",
+            "version": 1,
+            "weekStart": "",
+            "panels": [
+              {
+                "id": 1,
+                "title": "Build Worker Pod Count",
+                "description": "Number of running build-worker pods over time. Driven by KEDA, not by replicaCount.",
+                "type": "timeseries",
+                "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+                "fieldConfig": {
+                  "defaults": {
+                    "color": { "mode": "palette-classic" },
+                    "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 15, "lineWidth": 2 },
+                    "unit": "short",
+                    "min": 0
+                  },
+                  "overrides": []
+                },
+                "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+                "targets": [
+                  {
+                    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                    "expr": "kube_deployment_spec_replicas{deployment=\"build-worker\", namespace=\"launchpad\"}",
+                    "legendFormat": "desired replicas",
+                    "refId": "A"
+                  },
+                  {
+                    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                    "expr": "kube_deployment_status_replicas_ready{deployment=\"build-worker\", namespace=\"launchpad\"}",
+                    "legendFormat": "ready replicas",
+                    "refId": "B"
+                  }
+                ]
+              },
+              {
+                "id": 2,
+                "title": "Kafka Consumer Lag",
+                "description": "Pending jobs in the build-jobs topic — the signal KEDA scales on.",
+                "type": "timeseries",
+                "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+                "fieldConfig": {
+                  "defaults": {
+                    "color": { "mode": "palette-classic" },
+                    "custom": { "drawStyle": "line", "fillOpacity": 20, "lineWidth": 2 },
+                    "unit": "short",
+                    "min": 0
+                  },
+                  "overrides": []
+                },
+                "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+                "targets": [
+                  {
+                    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                    "expr": "keda_scaledobject_lag{scaledObject=\"build-worker-scaledobject\"}",
+                    "legendFormat": "consumer lag",
+                    "refId": "A"
+                  },
+                  {
+                    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                    "expr": "kafka_consumergroup_lag{consumergroup=\"build-workers\", topic=\"build-jobs\"}",
+                    "legendFormat": "lag (kafka-exporter fallback)",
+                    "refId": "B"
+                  }
+                ]
+              },
+              {
+                "id": 3,
+                "title": "Pods vs Lag Correlation",
+                "description": "THE key panel: watch pod count (left axis) rise as Kafka lag (right axis) climbs, then scale back to zero as the queue drains.",
+                "type": "timeseries",
+                "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                "gridPos": { "h": 9, "w": 24, "x": 0, "y": 8 },
+                "fieldConfig": {
+                  "defaults": {
+                    "color": { "mode": "palette-classic" },
+                    "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "axisPlacement": "left" },
+                    "unit": "short",
+                    "min": 0
+                  },
+                  "overrides": [
+                    {
+                      "matcher": { "id": "byName", "options": "consumer lag" },
+                      "properties": [
+                        { "id": "custom.axisPlacement", "value": "right" },
+                        { "id": "custom.axisLabel", "value": "Kafka lag (pending jobs)" },
+                        { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }
+                      ]
+                    },
+                    {
+                      "matcher": { "id": "byName", "options": "build-worker pods" },
+                      "properties": [
+                        { "id": "custom.axisLabel", "value": "Pod count" },
+                        { "id": "custom.lineInterpolation", "value": "stepAfter" },
+                        { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }
+                      ]
+                    }
+                  ]
+                },
+                "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max", "lastNotNull"] }, "tooltip": { "mode": "multi" } },
+                "targets": [
+                  {
+                    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                    "expr": "kube_deployment_status_replicas_ready{deployment=\"build-worker\", namespace=\"launchpad\"}",
+                    "legendFormat": "build-worker pods",
+                    "refId": "A"
+                  },
+                  {
+                    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                    "expr": "keda_scaledobject_lag{scaledObject=\"build-worker-scaledobject\"}",
+                    "legendFormat": "consumer lag",
+                    "refId": "B"
+                  }
+                ]
+              },
+              {
+                "id": 4,
+                "title": "Autoscaling Events (current replicas)",
+                "description": "HPA-managed services (upload-service) current vs desired replicas over the last hour.",
+                "type": "table",
+                "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                "gridPos": { "h": 8, "w": 12, "x": 0, "y": 17 },
+                "fieldConfig": { "defaults": { "custom": { "align": "auto" }, "unit": "short" }, "overrides": [] },
+                "options": { "showHeader": true },
+                "targets": [
+                  {
+                    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                    "expr": "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"launchpad\"}",
+                    "format": "table",
+                    "instant": true,
+                    "legendFormat": "{{horizontalpodautoscaler}}",
+                    "refId": "A"
+                  }
+                ]
+              },
+              {
+                "id": 5,
+                "title": "Scale-to-Zero Events (last 1h)",
+                "description": "How many sample windows build-worker sat at zero pods — proof scale-to-zero is working.",
+                "type": "stat",
+                "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                "gridPos": { "h": 8, "w": 6, "x": 12, "y": 17 },
+                "fieldConfig": {
+                  "defaults": {
+                    "unit": "short",
+                    "color": { "mode": "thresholds" },
+                    "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "blue", "value": 1 } ] }
+                  },
+                  "overrides": []
+                },
+                "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+                "targets": [
+                  {
+                    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                    "expr": "count_over_time((kube_deployment_spec_replicas{deployment=\"build-worker\", namespace=\"launchpad\"} == bool 0)[1h:1m])",
+                    "legendFormat": "idle windows",
+                    "refId": "A"
+                  }
+                ]
+              },
+              {
+                "id": 6,
+                "title": "Scaling Response Time",
+                "description": "Approximate seconds from lag crossing threshold to first new pod Ready. Target: < 15s.",
+                "type": "stat",
+                "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                "gridPos": { "h": 8, "w": 6, "x": 18, "y": 17 },
+                "fieldConfig": {
+                  "defaults": {
+                    "unit": "s",
+                    "color": { "mode": "thresholds" },
+                    "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 15 } ] }
+                  },
+                  "overrides": []
+                },
+                "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+                "targets": [
+                  {
+                    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                    "expr": "(time() - max(kube_pod_start_time{pod=~\"build-worker.*\", namespace=\"launchpad\"})) and on() (keda_scaledobject_lag{scaledObject=\"build-worker-scaledobject\"} > 5)",
+                    "legendFormat": "response time",
+                    "refId": "A"
+                  }
+                ]
+              }
+            ]
+          }
+          LP_EOF_1
+          cat > helm/launchpad/dashboards/launchpad-keda.json << 'LP_EOF_2'
+          {
+            "annotations": {
+              "list": [
+                {
+                  "builtIn": 1,
+                  "datasource": { "type": "datasource", "uid": "grafana" },
+                  "enable": true,
+                  "hide": true,
+                  "iconColor": "rgba(0, 211, 255, 1)",
+                  "name": "Annotations & Alerts",
+                  "type": "dashboard"
+                }
+              ]
+            },
+            "description": "Correlates KEDA-driven build-worker pod scaling with Kafka consumer lag. Proves lag — not CPU — is the scaling signal, and that scale-to-zero works.",
+            "editable": true,
+            "fiscalYearStartMonth": 0,
+            "graphTooltip": 1,
+            "links": [],
+            "liveNow": false,
+            "refresh": "10s",
+            "schemaVersion": 39,
+            "tags": ["launchpad", "keda", "autoscaling"],
+            "templating": {
+              "list": [
+                {
+                  "current": {},
+                  "hide": 0,
+                  "includeAll": false,
+                  "label": "Prometheus",
+                  "multi": false,
+                  "name": "datasource",
+                  "options": [],
+                  "query": "prometheus",
+                  "refresh": 1,
+                  "regex": "",
+                  "skipUrlSync": false,
+                  "type": "datasource"
+                }
+              ]
+            },
+            "time": { "from": "now-30m", "to": "now" },
+            "timepicker": {},
+            "timezone": "",
+            "title": "LaunchPad — KEDA Lag vs Pod Scaling",
+            "uid": "launchpad-keda",
+            "version": 1,
+            "weekStart": "",
+            "panels": [
+              {
+                "id": 1,
+                "title": "Build Worker Pod Count",
+                "description": "Number of running build-worker pods over time. Driven by KEDA, not by replicaCount.",
+                "type": "timeseries",
+                "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+                "fieldConfig": {
+                  "defaults": {
+                    "color": { "mode": "palette-classic" },
+                    "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 15, "lineWidth": 2 },
+                    "unit": "short",
+                    "min": 0
+                  },
+                  "overrides": []
+                },
+                "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+                "targets": [
+                  {
+                    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                    "expr": "kube_deployment_spec_replicas{deployment=\"build-worker\", namespace=\"launchpad\"}",
+                    "legendFormat": "desired replicas",
+                    "refId": "A"
+                  },
+                  {
+                    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                    "expr": "kube_deployment_status_replicas_ready{deployment=\"build-worker\", namespace=\"launchpad\"}",
+                    "legendFormat": "ready replicas",
+                    "refId": "B"
+                  }
+                ]
+              },
+              {
+                "id": 2,
+                "title": "Kafka Consumer Lag",
+                "description": "Pending jobs in the build-jobs topic — the signal KEDA scales on.",
+                "type": "timeseries",
+                "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+                "fieldConfig": {
+                  "defaults": {
+                    "color": { "mode": "palette-classic" },
+                    "custom": { "drawStyle": "line", "fillOpacity": 20, "lineWidth": 2 },
+                    "unit": "short",
+                    "min": 0
+                  },
+                  "overrides": []
+                },
+                "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+                "targets": [
+                  {
+                    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                    "expr": "keda_scaledobject_lag{scaledObject=\"build-worker-scaledobject\"}",
+                    "legendFormat": "consumer lag",
+                    "refId": "A"
+                  },
+                  {
+                    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                    "expr": "kafka_consumergroup_lag{consumergroup=\"build-workers\", topic=\"build-jobs\"}",
+                    "legendFormat": "lag (kafka-exporter fallback)",
+                    "refId": "B"
+                  }
+                ]
+              },
+              {
+                "id": 3,
+                "title": "Pods vs Lag Correlation",
+                "description": "THE key panel: watch pod count (left axis) rise as Kafka lag (right axis) climbs, then scale back to zero as the queue drains.",
+                "type": "timeseries",
+                "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                "gridPos": { "h": 9, "w": 24, "x": 0, "y": 8 },
+                "fieldConfig": {
+                  "defaults": {
+                    "color": { "mode": "palette-classic" },
+                    "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "axisPlacement": "left" },
+                    "unit": "short",
+                    "min": 0
+                  },
+                  "overrides": [
+                    {
+                      "matcher": { "id": "byName", "options": "consumer lag" },
+                      "properties": [
+                        { "id": "custom.axisPlacement", "value": "right" },
+                        { "id": "custom.axisLabel", "value": "Kafka lag (pending jobs)" },
+                        { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }
+                      ]
+                    },
+                    {
+                      "matcher": { "id": "byName", "options": "build-worker pods" },
+                      "properties": [
+                        { "id": "custom.axisLabel", "value": "Pod count" },
+                        { "id": "custom.lineInterpolation", "value": "stepAfter" },
+                        { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }
+                      ]
+                    }
+                  ]
+                },
+                "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max", "lastNotNull"] }, "tooltip": { "mode": "multi" } },
+                "targets": [
+                  {
+                    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                    "expr": "kube_deployment_status_replicas_ready{deployment=\"build-worker\", namespace=\"launchpad\"}",
+                    "legendFormat": "build-worker pods",
+                    "refId": "A"
+                  },
+                  {
+                    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                    "expr": "keda_scaledobject_lag{scaledObject=\"build-worker-scaledobject\"}",
+                    "legendFormat": "consumer lag",
+                    "refId": "B"
+                  }
+                ]
+              },
+              {
+                "id": 4,
+                "title": "Autoscaling Events (current replicas)",
+                "description": "HPA-managed services (upload-service) current vs desired replicas over the last hour.",
+                "type": "table",
+                "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                "gridPos": { "h": 8, "w": 12, "x": 0, "y": 17 },
+                "fieldConfig": { "defaults": { "custom": { "align": "auto" }, "unit": "short" }, "overrides": [] },
+                "options": { "showHeader": true },
+                "targets": [
+                  {
+                    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                    "expr": "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"launchpad\"}",
+                    "format": "table",
+                    "instant": true,
+                    "legendFormat": "{{horizontalpodautoscaler}}",
+                    "refId": "A"
+                  }
+                ]
+              },
+              {
+                "id": 5,
+                "title": "Scale-to-Zero Events (last 1h)",
+                "description": "How many sample windows build-worker sat at zero pods — proof scale-to-zero is working.",
+                "type": "stat",
+                "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                "gridPos": { "h": 8, "w": 6, "x": 12, "y": 17 },
+                "fieldConfig": {
+                  "defaults": {
+                    "unit": "short",
+                    "color": { "mode": "thresholds" },
+                    "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "blue", "value": 1 } ] }
+                  },
+                  "overrides": []
+                },
+                "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+                "targets": [
+                  {
+                    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                    "expr": "count_over_time((kube_deployment_spec_replicas{deployment=\"build-worker\", namespace=\"launchpad\"} == bool 0)[1h:1m])",
+                    "legendFormat": "idle windows",
+                    "refId": "A"
+                  }
+                ]
+              },
+              {
+                "id": 6,
+                "title": "Scaling Response Time",
+                "description": "Approximate seconds from lag crossing threshold to first new pod Ready. Target: < 15s.",
+                "type": "stat",
+                "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                "gridPos": { "h": 8, "w": 6, "x": 18, "y": 17 },
+                "fieldConfig": {
+                  "defaults": {
+                    "unit": "s",
+                    "color": { "mode": "thresholds" },
+                    "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 15 } ] }
+                  },
+                  "overrides": []
+                },
+                "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+                "targets": [
+                  {
+                    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+                    "expr": "(time() - max(kube_pod_start_time{pod=~\"build-worker.*\", namespace=\"launchpad\"})) and on() (keda_scaledobject_lag{scaledObject=\"build-worker-scaledobject\"} > 5)",
+                    "legendFormat": "response time",
+                    "refId": "A"
+                  }
+                ]
+              }
+            ]
+          }
+          LP_EOF_2
+          cat > helm/launchpad/templates/observability/grafana-dashboard.yaml << 'LP_EOF_3'
+          {{- if .Values.observability.enabled }}
+          # Wraps the LaunchPad KEDA dashboard JSON in a ConfigMap. The grafana_dashboard
+          # label makes the kube-prometheus-stack Grafana sidecar auto-import it (no UI clicks).
+          # The JSON is injected verbatim with .Files.Get so Grafana's own double-brace {{`{{`}} legend syntax
+          # is NOT interpreted by Helm.
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: launchpad-grafana-dashboards
+            namespace: {{ .Release.Namespace }}
+            labels:
+              grafana_dashboard: "1"
+              {{- include "launchpad.labels" . | nindent 4 }}
+          data:
+            launchpad-keda.json: |-
+          {{ .Files.Get "dashboards/launchpad-keda.json" | indent 4 }}
+          {{- end }}
+          LP_EOF_3
+
+      - name: Commit with scheduled date
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GIT_AUTHOR_DATE: "2026-06-26T13:45:00+05:30"
+          GIT_COMMITTER_DATE: "2026-06-26T13:45:00+05:30"
+        run: |
+          git config user.name "rasram"
+          git config user.email "rasram@users.noreply.github.com"
+          git add observability/dashboards/launchpad-keda.json \
+            helm/launchpad/dashboards/launchpad-keda.json \
+            helm/launchpad/templates/observability/grafana-dashboard.yaml
+          git commit -m "feat(observability): Grafana dashboard for KEDA lag correlation"
+          git push
+
+      - name: Disable this workflow after success
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable "commit-phase4b.yml" --repo "$GITHUB_REPOSITORY" || true

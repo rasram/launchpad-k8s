@@ -1,0 +1,134 @@
+name: commit-phase2b
+
+on:
+  schedule:
+    - cron: "15 5 18 6 *"
+  workflow_dispatch:
+
+jobs:
+  commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Skip if this commit already exists
+        id: guard
+        run: |
+          if git log --oneline --fixed-strings --grep="feat(keda): build-worker ScaledObject on Kafka consumer lag" | grep -q .; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Commit already present — nothing to do."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create phase2b files
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          mkdir -p helm/launchpad/templates/build-worker
+          cat > helm/launchpad/templates/build-worker/deployment.yaml << 'LP_EOF_1'
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: build-worker
+            namespace: {{ .Release.Namespace }}
+            labels:
+              app: build-worker
+              {{- include "launchpad.labels" . | nindent 4 }}
+          spec:
+            # replicaCount stays 0 in values — KEDA owns this number at runtime.
+            # On install the worker fleet is empty; KEDA scales it up the moment Kafka lag appears.
+            replicas: {{ .Values.buildWorker.replicaCount }}
+            selector:
+              matchLabels:
+                app: build-worker
+            template:
+              metadata:
+                labels:
+                  app: build-worker
+                  {{- include "launchpad.labels" . | nindent 8 }}
+              spec:
+                containers:
+                  - name: build-worker
+                    image: "{{ .Values.global.imageRegistry }}/{{ .Values.buildWorker.image.repository }}:{{ .Values.buildWorker.image.tag }}"
+                    imagePullPolicy: IfNotPresent
+                    envFrom:
+                      - configMapRef:
+                          name: launchpad-config
+                      - secretRef:
+                          name: launchpad-secrets
+                    env:
+                      - name: KAFKA_BOOTSTRAP_SERVERS
+                        value: {{ .Values.kafka.bootstrapServers | quote }}
+                      - name: KAFKA_TOPIC
+                        value: {{ .Values.buildWorker.keda.kafkaTopic | quote }}
+                      - name: KAFKA_CONSUMER_GROUP
+                        value: {{ .Values.buildWorker.keda.consumerGroup | quote }}
+                    resources:
+                      {{- toYaml .Values.buildWorker.resources | nindent 12 }}
+                # Builds must finish; give in-flight jobs time to drain on scale-down / rollout.
+                terminationGracePeriodSeconds: 120
+          LP_EOF_1
+          cat > helm/launchpad/templates/build-worker/scaledobject.yaml << 'LP_EOF_2'
+          {{- if .Values.buildWorker.keda.enabled }}
+          # ──────────────────────────────────────────────────────────────────────────────
+          # THE KEY DIFFERENTIATOR — KEDA ScaledObject (NOT a CPU HorizontalPodAutoscaler)
+          #
+          # We use KEDA instead of CPU-based HPA for build-worker because:
+          #   1. Build workers sit at 0–2% CPU even when 100 jobs are queued in Kafka —
+          #      they are I/O- and clone-bound, not CPU-bound. CPU is a meaningless signal here.
+          #   2. A CPU HPA would therefore never trigger: 500 jobs could pile up while the
+          #      autoscaler sees "2% CPU, nothing to do" and keeps a single pod.
+          #   3. Kafka consumer lag IS the correct scaling signal — it is literally the number
+          #      of pending build jobs. We scale 1 pod per `lagThreshold` pending jobs.
+          #   4. minReplicaCount: 0 gives true scale-to-zero — zero pods, zero cost when the
+          #      build queue is empty. Standard HPA cannot do this (it requires minReplicas >= 1).
+          # ──────────────────────────────────────────────────────────────────────────────
+          apiVersion: keda.sh/v1alpha1
+          kind: ScaledObject
+          metadata:
+            name: build-worker-scaledobject
+            namespace: {{ .Release.Namespace }}
+            labels:
+              app: build-worker
+              {{- include "launchpad.labels" . | nindent 4 }}
+          spec:
+            scaleTargetRef:
+              name: build-worker
+            minReplicaCount: {{ .Values.buildWorker.keda.minReplicaCount }}  # 0 — scale to zero at idle
+            maxReplicaCount: {{ .Values.buildWorker.keda.maxReplicaCount }}  # 8 dev / 12 staging / 20 prod
+            pollingInterval: {{ .Values.buildWorker.keda.pollingInterval }}  # how often KEDA checks lag (s)
+            cooldownPeriod: {{ .Values.buildWorker.keda.cooldownPeriod }}    # wait before scaling back to 0 (s)
+            triggers:
+              - type: kafka
+                metadata:
+                  bootstrapServers: {{ .Values.kafka.bootstrapServers }}
+                  consumerGroup: {{ .Values.buildWorker.keda.consumerGroup }}
+                  topic: {{ .Values.buildWorker.keda.kafkaTopic }}
+                  lagThreshold: "{{ .Values.buildWorker.keda.lagThreshold }}"
+                  offsetResetPolicy: latest
+          {{- end }}
+          LP_EOF_2
+
+      - name: Commit with scheduled date
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GIT_AUTHOR_DATE: "2026-06-18T10:45:00+05:30"
+          GIT_COMMITTER_DATE: "2026-06-18T10:45:00+05:30"
+        run: |
+          git config user.name "rasram"
+          git config user.email "rasram@users.noreply.github.com"
+          git add helm/launchpad/templates/build-worker/deployment.yaml \
+            helm/launchpad/templates/build-worker/scaledobject.yaml
+          git commit -m "feat(keda): build-worker ScaledObject on Kafka consumer lag"
+          git push
+
+      - name: Disable this workflow after success
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable "commit-phase2b.yml" --repo "$GITHUB_REPOSITORY" || true

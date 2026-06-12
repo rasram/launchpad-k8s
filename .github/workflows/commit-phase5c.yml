@@ -1,0 +1,179 @@
+name: commit-phase5c
+
+on:
+  schedule:
+    - cron: "0 6 3 7 *"
+  workflow_dispatch:
+
+jobs:
+  commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Skip if this commit already exists
+        id: guard
+        run: |
+          if git log --oneline --fixed-strings --grep="docs: README with ASCII architecture and quick start" | grep -q .; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Commit already present — nothing to do."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create phase5c files
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          cat > README.md << 'LP_EOF_1'
+          # LaunchPad-K8s
+
+          > LaunchPad's 4-microservice platform on Kubernetes with **KEDA event-driven
+          > autoscaling**. Build workers scale on **Kafka consumer lag — not CPU** — and
+          > **scale to zero** when the queue is empty. Deployments are **GitOps** (ArgoCD),
+          > not `kubectl apply`.
+
+          This repo is the Kubernetes + GitOps layer for LaunchPad. It does not contain the
+          application code — it deploys the published service images and adds the autoscaling,
+          GitOps, and observability that turn four containers into a production platform.
+
+          ## Architecture
+
+          ```
+                  git push (edit a values file)
+                           │
+                           ▼
+                  ┌──────────────────┐        watches repo, auto-syncs
+                  │     ArgoCD       │  ──────────────────────────────┐
+                  │  (GitOps engine) │   self-heal · prune · revert    │
+                  └────────┬─────────┘                                 │
+                           │ renders Helm chart (helm/launchpad)        │
+                           ▼                                            │
+             ┌──────────────────────────────────────────────────────┐ │
+             │                  Kubernetes cluster                   │◄┘
+             │                                                       │
+             │   Ingress (nginx, TLS)                                │
+             │     /api/upload ─► upload-service  ──[CPU HPA 1..5]   │
+             │     /api/deploy ─► deploy-service                     │
+             │     /          ─► router-service   (2x, HA)           │
+             │                                                       │
+             │   upload-service ──► Kafka topic: build-jobs          │
+             │                            │                          │
+             │                            │ consumer lag             │
+             │                            ▼                          │
+             │                     ┌─────────────┐                   │
+             │                     │    KEDA     │ reads lag every 10s│
+             │                     └──────┬──────┘                   │
+             │                            │ scales 0..8 (dev) 0..20(prod)
+             │                            ▼                          │
+             │                     build-worker pods  ░░░░░  0 at idle│
+             │                                                       │
+             │   Prometheus ◄─ ServiceMonitor ─ scrapes /metrics      │
+             │        └─► Grafana: "Pods vs Lag Correlation"          │
+             └──────────────────────────────────────────────────────┘
+          ```
+
+          ## Why KEDA over HPA
+
+          A build worker idles at 0–2% CPU even with hundreds of jobs queued — it is I/O- and
+          clone-bound, not CPU-bound. A CPU-based HPA would never scale it up: the metric is
+          flat regardless of backlog, so 500 queued jobs would drain at one-pod throughput
+          while the autoscaler reports "nothing to do."
+
+          KEDA scales on **Kafka consumer lag**, which is literally the number of pending
+          build jobs — one pod per N pending jobs. And because KEDA supports
+          `minReplicaCount: 0`, the worker fleet **scales to zero** at idle (zero pods, zero
+          cost), something a standard HPA cannot do. See [DECISIONS.md](DECISIONS.md) for the
+          full rationale.
+
+          ## Quick start
+
+          ```bash
+          # 1. Bootstrap a local cluster (minikube + KEDA + ArgoCD + ingress + Prometheus)
+          ./scripts/setup-cluster.sh
+
+          # 2. Open the UIs (Grafana :3000, ArgoCD :8080)
+          ./scripts/port-forward.sh
+
+          # 3. Push 20 build jobs onto Kafka and watch pods scale 0 -> N
+          ./scripts/load-test.sh 20
+
+          # 4. Watch the autoscaler react in real time
+          kubectl get pods -n launchpad -l app=build-worker -w
+          kubectl get scaledobject -n launchpad
+          ```
+
+          Expect build-worker pods to go from **0 to N within ~15 seconds** of lag crossing
+          the threshold, then back to 0 after the queue drains and the cooldown elapses.
+
+          ## Environments
+
+          One chart, three overlays. Each overlay overrides only what differs:
+
+          | Setting                     | dev (`values.yaml`) | staging              | prod                 |
+          |-----------------------------|---------------------|----------------------|----------------------|
+          | upload-service replicas     | 1                   | 2                    | 3                    |
+          | upload-service HPA min/max  | 1 / 5               | 2 / 10               | 3 / 20               |
+          | build-worker KEDA min       | 0 (scale-to-zero)   | 0                    | 0                    |
+          | build-worker KEDA max       | 8                   | 12                   | 20                   |
+          | build-worker lag threshold  | 5 jobs/pod          | 4 jobs/pod           | 3 jobs/pod           |
+          | router-service replicas     | 2                   | 3                    | 5                    |
+          | cert-manager issuer         | letsencrypt-staging | letsencrypt-staging  | letsencrypt-prod     |
+
+          ```bash
+          helm template launchpad helm/launchpad -f helm/launchpad/values.prod.yaml
+          ```
+
+          ## Observability
+
+          ```bash
+          ./scripts/port-forward.sh          # Grafana at http://localhost:3000 (admin/admin)
+          ```
+
+          Open the **LaunchPad → "LaunchPad — KEDA Lag vs Pod Scaling"** dashboard. The panel
+          that matters is **"Pods vs Lag Correlation"**: it overlays build-worker pod count
+          (left axis) against Kafka consumer lag (right axis), so you can watch KEDA add pods
+          as lag climbs and drop to zero as the queue clears. Other panels track scale-to-zero
+          events and scaling response time (target < 15s).
+
+          Wiring: each service is scraped via a Prometheus `ServiceMonitor` (selected by the
+          `app.kubernetes.io/part-of: launchpad` label); the dashboard ships as a labelled
+          ConfigMap that the Grafana sidecar auto-imports — no manual import step.
+
+          ## Repository layout
+
+          ```
+          helm/launchpad/      Helm chart: templates + dev/staging/prod value overlays
+          argocd/              ArgoCD AppProject + Application (the only deploy path)
+          observability/       kube-prometheus-stack values + Grafana dashboard JSON
+          scripts/             setup-cluster · port-forward · load-test
+          .github/workflows/   helm lint + kubectl dry-run (CI), ArgoCD sync (CD)
+          ```
+
+          ## Key decisions
+
+          The reasoning behind KEDA-vs-HPA, GitOps-vs-kubectl, Helm overlays, and what I would
+          add at production scale lives in **[DECISIONS.md](DECISIONS.md)**.
+          LP_EOF_1
+
+      - name: Commit with scheduled date
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GIT_AUTHOR_DATE: "2026-07-03T11:30:00+05:30"
+          GIT_COMMITTER_DATE: "2026-07-03T11:30:00+05:30"
+        run: |
+          git config user.name "rasram"
+          git config user.email "rasram@users.noreply.github.com"
+          git add README.md
+          git commit -m "docs: README with ASCII architecture and quick start"
+          git push
+
+      - name: Disable this workflow after success
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable "commit-phase5c.yml" --repo "$GITHUB_REPOSITORY" || true

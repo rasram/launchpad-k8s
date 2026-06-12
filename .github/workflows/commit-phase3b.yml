@@ -1,0 +1,117 @@
+name: commit-phase3b
+
+on:
+  schedule:
+    - cron: "0 10 23 6 *"
+  workflow_dispatch:
+
+jobs:
+  commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Skip if this commit already exists
+        id: guard
+        run: |
+          if git log --oneline --fixed-strings --grep="feat(gitops): cluster bootstrap and load-test scripts" | grep -q .; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Commit already present — nothing to do."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create phase3b files
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          mkdir -p scripts
+          cat > scripts/setup-cluster.sh << 'LP_EOF_1'
+          #!/bin/bash
+          # One-command local cluster bootstrap for LaunchPad-K8s.
+          # Usage: ./scripts/setup-cluster.sh
+          set -e
+
+          echo "--- Starting minikube ---"
+          minikube start --cpus=4 --memory=8192 --driver=docker
+
+          echo "--- Installing KEDA ---"
+          helm repo add kedacore https://kedacore.github.io/charts
+          helm repo update
+          helm upgrade --install keda kedacore/keda --namespace keda --create-namespace
+
+          echo "--- Installing ArgoCD ---"
+          kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+          echo "--- Installing Nginx Ingress ---"
+          helm upgrade --install ingress-nginx ingress-nginx \
+            --repo https://kubernetes.github.io/ingress-nginx \
+            --namespace ingress-nginx --create-namespace
+
+          echo "--- Installing kube-prometheus-stack ---"
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm install monitoring prometheus-community/kube-prometheus-stack \
+            --namespace monitoring --create-namespace \
+            -f observability/prometheus-values.yaml
+
+          echo "--- Waiting for ArgoCD server (CRDs must register before the Application applies) ---"
+          kubectl rollout status deployment/argocd-server -n argocd --timeout=300s
+
+          echo "--- Applying ArgoCD Application ---"
+          kubectl apply -f argocd/project.yaml
+          kubectl apply -f argocd/application.yaml
+
+          echo "--- Done. Run ./scripts/port-forward.sh to access UIs ---"
+          LP_EOF_1
+          cat > scripts/port-forward.sh << 'LP_EOF_2'
+          #!/bin/bash
+          # Forward ArgoCD, Grafana, and the app to localhost. Ctrl+C stops all.
+          echo "Forwarding ArgoCD to https://localhost:8080"
+          kubectl port-forward svc/argocd-server -n argocd 8080:443 &
+          echo "Forwarding Grafana to http://localhost:3000"
+          kubectl port-forward svc/monitoring-grafana -n monitoring 3000:80 &
+          echo "Forwarding app to http://localhost:8001"
+          kubectl port-forward svc/upload-service -n launchpad 8001:8001 &
+          wait
+          LP_EOF_2
+          cat > scripts/load-test.sh << 'LP_EOF_3'
+          #!/bin/bash
+          # Push N build jobs onto Kafka and watch KEDA scale build-worker pods from 0.
+          # Usage: ./scripts/load-test.sh 20
+          JOBS=${1:-10}
+          echo "--- Pushing $JOBS jobs to Kafka ---"
+          for i in $(seq 1 $JOBS); do
+            kubectl exec -n launchpad deployment/upload-service -- \
+              kafka-console-producer.sh \
+                --bootstrap-server launchpad-kafka:9092 \
+                --topic build-jobs <<< "{\"repo_id\": \"test-$i\", \"branch\": \"main\"}"
+          done
+          echo "--- Watching pod count (Ctrl+C to stop) ---"
+          watch -n 2 "kubectl get pods -n launchpad -l app=build-worker"
+          LP_EOF_3
+          chmod +x scripts/setup-cluster.sh scripts/port-forward.sh scripts/load-test.sh
+
+      - name: Commit with scheduled date
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GIT_AUTHOR_DATE: "2026-06-23T15:30:00+05:30"
+          GIT_COMMITTER_DATE: "2026-06-23T15:30:00+05:30"
+        run: |
+          git config user.name "rasram"
+          git config user.email "rasram@users.noreply.github.com"
+          git add scripts/setup-cluster.sh \
+            scripts/port-forward.sh \
+            scripts/load-test.sh
+          git commit -m "feat(gitops): cluster bootstrap and load-test scripts"
+          git push
+
+      - name: Disable this workflow after success
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable "commit-phase3b.yml" --repo "$GITHUB_REPOSITORY" || true

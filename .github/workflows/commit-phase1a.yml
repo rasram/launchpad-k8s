@@ -1,0 +1,249 @@
+name: commit-phase1a
+
+on:
+  schedule:
+    - cron: "0 5 12 6 *"
+  workflow_dispatch:
+
+jobs:
+  commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Skip if this commit already exists
+        id: guard
+        run: |
+          if git log --oneline --fixed-strings --grep="scaffold: helm chart structure with multi-env values overlays" | grep -q .; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Commit already present — nothing to do."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create phase1a files
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          mkdir -p argocd helm/launchpad helm/launchpad/templates helm/launchpad/templates/build-worker helm/launchpad/templates/deploy-service helm/launchpad/templates/ingress helm/launchpad/templates/kafka helm/launchpad/templates/observability helm/launchpad/templates/router-service helm/launchpad/templates/upload-service observability/dashboards scripts
+          cat > helm/launchpad/Chart.yaml << 'LP_EOF_1'
+          apiVersion: v2
+          name: launchpad
+          description: LaunchPad automated deployment platform
+          type: application
+          version: 0.1.0
+          appVersion: "1.0.0"
+          dependencies:
+            - name: kafka
+              version: "26.x.x"
+              repository: https://charts.bitnami.com/bitnami
+              condition: kafka.enabled
+          LP_EOF_1
+          cat > helm/launchpad/values.yaml << 'LP_EOF_2'
+          # Base values — dev defaults.
+          # Override per environment with values.staging.yaml / values.prod.yaml.
+          global:
+            environment: dev
+            imageRegistry: ghcr.io/rasram
+
+          uploadService:
+            replicaCount: 1
+            image:
+              repository: launchpad-upload
+              tag: latest
+            port: 8001
+            resources:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+              limits:
+                cpu: 500m
+                memory: 256Mi
+            hpa:
+              enabled: true
+              minReplicas: 1
+              maxReplicas: 5
+              targetCPUUtilizationPercentage: 70
+
+          buildWorker:
+            replicaCount: 0          # KEDA manages this — starts at 0
+            image:
+              repository: launchpad-build
+              tag: latest
+            resources:
+              requests:
+                cpu: 500m
+                memory: 512Mi
+              limits:
+                cpu: 2000m
+                memory: 2Gi
+            keda:
+              enabled: true
+              minReplicaCount: 0     # Scale to ZERO at idle
+              maxReplicaCount: 8
+              kafkaTopic: build-jobs
+              consumerGroup: build-workers
+              lagThreshold: "5"      # 1 pod per 5 pending jobs
+              cooldownPeriod: 60
+              pollingInterval: 10
+
+          deployService:
+            replicaCount: 1
+            image:
+              repository: launchpad-deploy
+              tag: latest
+            port: 8002
+            resources:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+              limits:
+                cpu: 500m
+                memory: 256Mi
+
+          routerService:
+            replicaCount: 2          # Always 2 for HA
+            image:
+              repository: launchpad-router
+              tag: latest
+            port: 8080
+            resources:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+              limits:
+                cpu: 500m
+                memory: 256Mi
+
+          kafka:
+            enabled: true
+            replicaCount: 1
+            bootstrapServers: launchpad-kafka:9092
+
+          ingress:
+            enabled: true
+            className: nginx
+            host: launchpad.local
+            tls:
+              enabled: true
+              clusterIssuer: letsencrypt-staging
+            annotations:
+              nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+
+          config:
+            logLevel: debug
+
+          observability:
+            enabled: true
+            prometheusOperator: true
+          LP_EOF_2
+          cat > helm/launchpad/values.staging.yaml << 'LP_EOF_3'
+          # Staging overrides — between dev and prod.
+          global:
+            environment: staging
+
+          uploadService:
+            replicaCount: 2
+            hpa:
+              minReplicas: 2
+              maxReplicas: 10
+
+          buildWorker:
+            keda:
+              maxReplicaCount: 12
+              lagThreshold: "4"
+
+          routerService:
+            replicaCount: 3
+          LP_EOF_3
+          cat > helm/launchpad/.helmignore << 'LP_EOF_4'
+          .gitkeep
+          .DS_Store
+          .git/
+          LP_EOF_4
+          cat > helm/launchpad/templates/_helpers.tpl << 'LP_EOF_5'
+          {{/* Chart name */}}
+          {{- define "launchpad.name" -}}
+          {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
+          {{- end -}}
+
+          {{/* Chart name + version, for the helm.sh/chart label */}}
+          {{- define "launchpad.chart" -}}
+          {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
+          {{- end -}}
+
+          {{/*
+          Common labels applied to every LaunchPad object.
+          NOTE: app.kubernetes.io/part-of: launchpad is load-bearing — Prometheus'
+          serviceMonitorSelector and our ServiceMonitor selector both key off it.
+          */}}
+          {{- define "launchpad.labels" -}}
+          app.kubernetes.io/name: {{ include "launchpad.name" . }}
+          app.kubernetes.io/instance: {{ .Release.Name }}
+          app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+          app.kubernetes.io/managed-by: {{ .Release.Service }}
+          app.kubernetes.io/part-of: launchpad
+          helm.sh/chart: {{ include "launchpad.chart" . }}
+          launchpad.io/environment: {{ .Values.global.environment }}
+          {{- end -}}
+          LP_EOF_5
+          cat > helm/launchpad/templates/namespace.yaml << 'LP_EOF_6'
+          # Namespace is templated for completeness; ArgoCD also creates it via
+          # syncOptions: CreateNamespace=true. Guarded so it can be disabled if the
+          # namespace is managed externally.
+          {{- if .Values.global.createNamespace | default true }}
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: {{ .Release.Namespace }}
+            labels:
+              {{- include "launchpad.labels" . | nindent 4 }}
+          {{- end }}
+          LP_EOF_6
+          touch helm/launchpad/templates/upload-service/.gitkeep
+          touch helm/launchpad/templates/build-worker/.gitkeep
+          touch helm/launchpad/templates/deploy-service/.gitkeep
+          touch helm/launchpad/templates/router-service/.gitkeep
+          touch helm/launchpad/templates/kafka/.gitkeep
+          touch helm/launchpad/templates/ingress/.gitkeep
+          touch helm/launchpad/templates/observability/.gitkeep
+          touch argocd/.gitkeep
+          touch scripts/.gitkeep
+          touch observability/dashboards/.gitkeep
+
+      - name: Commit with scheduled date
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GIT_AUTHOR_DATE: "2026-06-12T10:30:00+05:30"
+          GIT_COMMITTER_DATE: "2026-06-12T10:30:00+05:30"
+        run: |
+          git config user.name "rasram"
+          git config user.email "rasram@users.noreply.github.com"
+          git add helm/launchpad/Chart.yaml \
+            helm/launchpad/values.yaml \
+            helm/launchpad/values.staging.yaml \
+            helm/launchpad/.helmignore \
+            helm/launchpad/templates/_helpers.tpl \
+            helm/launchpad/templates/namespace.yaml \
+            helm/launchpad/templates/upload-service/.gitkeep \
+            helm/launchpad/templates/build-worker/.gitkeep \
+            helm/launchpad/templates/deploy-service/.gitkeep \
+            helm/launchpad/templates/router-service/.gitkeep \
+            helm/launchpad/templates/kafka/.gitkeep \
+            helm/launchpad/templates/ingress/.gitkeep \
+            helm/launchpad/templates/observability/.gitkeep \
+            argocd/.gitkeep \
+            scripts/.gitkeep \
+            observability/dashboards/.gitkeep
+          git commit -m "scaffold: helm chart structure with multi-env values overlays"
+          git push
+
+      - name: Disable this workflow after success
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable "commit-phase1a.yml" --repo "$GITHUB_REPOSITORY" || true
