@@ -1,0 +1,96 @@
+# Base values — dev defaults.
+# Override per environment with values.staging.yaml / values.prod.yaml.
+global:
+  environment: dev
+  imageRegistry: ghcr.io/rasram
+
+uploadService:
+  replicaCount: 1
+  image:
+    repository: launchpad-upload
+    tag: latest
+  port: 8001
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  hpa:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+
+buildWorker:
+  replicaCount: 0          # KEDA manages this — starts at 0
+  image:
+    repository: launchpad-build
+    tag: latest
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  keda:
+    enabled: true
+    minReplicaCount: 0     # Scale to ZERO at idle
+    maxReplicaCount: 8
+    kafkaTopic: build-jobs
+    consumerGroup: build-workers
+    lagThreshold: "5"      # 1 pod per 5 pending jobs
+    cooldownPeriod: 60
+    pollingInterval: 10
+
+deployService:
+  replicaCount: 1
+  image:
+    repository: launchpad-deploy
+    tag: latest
+  port: 8002
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+routerService:
+  replicaCount: 2          # Always 2 for HA
+  image:
+    repository: launchpad-router
+    tag: latest
+  port: 8080
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+kafka:
+  enabled: true
+  replicaCount: 1
+  bootstrapServers: launchpad-kafka:9092
+
+ingress:
+  enabled: true
+  className: nginx
+  host: launchpad.local
+  tls:
+    enabled: true
+    clusterIssuer: letsencrypt-staging
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+
+config:
+  logLevel: debug
+
+observability:
+  enabled: true
+  prometheusOperator: true

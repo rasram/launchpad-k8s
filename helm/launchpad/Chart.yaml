@@ -1,0 +1,11 @@
+apiVersion: v2
+name: launchpad
+description: LaunchPad automated deployment platform
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+dependencies:
+  - name: kafka
+    version: "26.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: kafka.enabled

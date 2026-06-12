@@ -1,0 +1,11 @@
+# Namespace is templated for completeness; ArgoCD also creates it via
+# syncOptions: CreateNamespace=true. Guarded so it can be disabled if the
+# namespace is managed externally.
+{{- if .Values.global.createNamespace | default true }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  labels:
+    {{- include "launchpad.labels" . | nindent 4 }}
+{{- end }}

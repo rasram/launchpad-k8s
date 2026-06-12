@@ -1,0 +1,17 @@
+# Staging overrides — between dev and prod.
+global:
+  environment: staging
+
+uploadService:
+  replicaCount: 2
+  hpa:
+    minReplicas: 2
+    maxReplicas: 10
+
+buildWorker:
+  keda:
+    maxReplicaCount: 12
+    lagThreshold: "4"
+
+routerService:
+  replicaCount: 3
