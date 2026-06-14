@@ -1,0 +1,8 @@
+charts/
+*.lock
+kubeconfig
+*.pem
+.env
+.env.*
+!.env.example
+private-key*

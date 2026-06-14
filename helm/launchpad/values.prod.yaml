@@ -1,0 +1,29 @@
+# Production overrides — more replicas, stricter limits, aggressive KEDA.
+global:
+  environment: prod
+
+uploadService:
+  replicaCount: 3
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+  hpa:
+    minReplicas: 3
+    maxReplicas: 20
+
+buildWorker:
+  keda:
+    maxReplicaCount: 20
+    lagThreshold: "3"      # More aggressive in prod
+
+routerService:
+  replicaCount: 5
+
+ingress:
+  host: launchpad.example.com
+  tls:
+    clusterIssuer: letsencrypt-prod
+
+config:
+  logLevel: warn
