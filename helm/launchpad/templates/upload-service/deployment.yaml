@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: upload-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: upload-service
+    {{- include "launchpad.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.uploadService.replicaCount }}
+  selector:
+    matchLabels:
+      app: upload-service
+  template:
+    metadata:
+      labels:
+        app: upload-service
+        {{- include "launchpad.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: upload-service
+          image: "{{ .Values.global.imageRegistry }}/{{ .Values.uploadService.image.repository }}:{{ .Values.uploadService.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: {{ .Values.uploadService.port }}
+          envFrom:
+            - configMapRef:
+                name: launchpad-config
+            - secretRef:
+                name: launchpad-secrets
+          # Stateless HTTP service — readiness gates traffic, liveness restarts hung pods.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.uploadService.resources | nindent 12 }}
+      # Spread replicas across zones so a single AZ failure cannot take the service down.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: upload-service

@@ -1,0 +1,29 @@
+{{- if .Values.uploadService.hpa.enabled }}
+# CPU-based HorizontalPodAutoscaler — the CORRECT choice for upload-service.
+# upload-service is a stateless HTTP handler: request volume tracks CPU, so CPU
+# utilization is a faithful proxy for load. Contrast with build-worker, which is
+# an event consumer idle at ~0% CPU even with a deep queue — there we use a KEDA
+# ScaledObject driven by Kafka consumer lag instead (see build-worker/scaledobject.yaml).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: upload-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: upload-service
+    {{- include "launchpad.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: upload-service
+  minReplicas: {{ .Values.uploadService.hpa.minReplicas }}
+  maxReplicas: {{ .Values.uploadService.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.uploadService.hpa.targetCPUUtilizationPercentage }}
+{{- end }}
