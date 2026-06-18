@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: build-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: build-worker
+    {{- include "launchpad.labels" . | nindent 4 }}
+spec:
+  # replicaCount stays 0 in values — KEDA owns this number at runtime.
+  # On install the worker fleet is empty; KEDA scales it up the moment Kafka lag appears.
+  replicas: {{ .Values.buildWorker.replicaCount }}
+  selector:
+    matchLabels:
+      app: build-worker
+  template:
+    metadata:
+      labels:
+        app: build-worker
+        {{- include "launchpad.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: build-worker
+          image: "{{ .Values.global.imageRegistry }}/{{ .Values.buildWorker.image.repository }}:{{ .Values.buildWorker.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: launchpad-config
+            - secretRef:
+                name: launchpad-secrets
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: {{ .Values.kafka.bootstrapServers | quote }}
+            - name: KAFKA_TOPIC
+              value: {{ .Values.buildWorker.keda.kafkaTopic | quote }}
+            - name: KAFKA_CONSUMER_GROUP
+              value: {{ .Values.buildWorker.keda.consumerGroup | quote }}
+          resources:
+            {{- toYaml .Values.buildWorker.resources | nindent 12 }}
+      # Builds must finish; give in-flight jobs time to drain on scale-down / rollout.
+      terminationGracePeriodSeconds: 120
