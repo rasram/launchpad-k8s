@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deploy-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: deploy-service
+    {{- include "launchpad.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.deployService.replicaCount }}
+  selector:
+    matchLabels:
+      app: deploy-service
+  template:
+    metadata:
+      labels:
+        app: deploy-service
+        {{- include "launchpad.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: deploy-service
+          image: "{{ .Values.global.imageRegistry }}/{{ .Values.deployService.image.repository }}:{{ .Values.deployService.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: {{ .Values.deployService.port }}
+          envFrom:
+            - configMapRef:
+                name: launchpad-config
+            - secretRef:
+                name: launchpad-secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.deployService.resources | nindent 12 }}

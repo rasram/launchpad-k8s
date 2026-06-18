@@ -1,0 +1,18 @@
+{{- if .Values.kafka.enabled }}
+# Strimzi KafkaTopic for the build-jobs queue. The Kafka cluster itself is
+# provisioned by the Strimzi operator (or the bundled bitnami subchart in dev);
+# this declares the topic whose consumer lag is KEDA's scaling signal.
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: {{ .Values.buildWorker.keda.kafkaTopic }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    strimzi.io/cluster: launchpad-kafka
+    {{- include "launchpad.labels" . | nindent 4 }}
+spec:
+  partitions: 3
+  replicas: 1
+  config:
+    retention.ms: 604800000   # 7 days
+{{- end }}

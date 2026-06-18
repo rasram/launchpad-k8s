@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: deploy-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: deploy-service
+    {{- include "launchpad.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: deploy-service
+  ports:
+    - name: http
+      port: {{ .Values.deployService.port }}
+      targetPort: http

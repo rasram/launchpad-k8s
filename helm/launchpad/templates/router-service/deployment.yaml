@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: router-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: router-service
+    {{- include "launchpad.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.routerService.replicaCount }}
+  selector:
+    matchLabels:
+      app: router-service
+  template:
+    metadata:
+      labels:
+        app: router-service
+        {{- include "launchpad.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: router-service
+          image: "{{ .Values.global.imageRegistry }}/{{ .Values.routerService.image.repository }}:{{ .Values.routerService.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: {{ .Values.routerService.port }}
+          envFrom:
+            - configMapRef:
+                name: launchpad-config
+            - secretRef:
+                name: launchpad-secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.routerService.resources | nindent 12 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: router-service
