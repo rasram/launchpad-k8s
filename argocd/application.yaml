@@ -1,0 +1,33 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: launchpad
+  namespace: argocd
+  annotations:
+    # ──────────────────────────────────────────────────────────────────────
+    # This Application definition is the ONLY way to deploy LaunchPad.
+    # kubectl apply in production is forbidden.
+    #   Deploy  : edit a values file -> git commit -> ArgoCD auto-syncs.
+    #   Rollback: git revert -> ArgoCD syncs the previous state.
+    #   Drift   : manual kubectl changes are reverted automatically (selfHeal).
+    # The cluster's desired state lives in git, not in a CI pipeline.
+    # ──────────────────────────────────────────────────────────────────────
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: launchpad
+  source:
+    repoURL: https://github.com/rasram/launchpad-k8s
+    targetRevision: main
+    path: helm/launchpad
+    helm:
+      valueFiles:
+        - values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: launchpad
+  syncPolicy:
+    automated:
+      prune: true      # Delete resources removed from git
+      selfHeal: true   # Revert manual kubectl changes
+    syncOptions:
+      - CreateNamespace=true

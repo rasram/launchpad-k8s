@@ -1,0 +1,15 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: launchpad
+  namespace: argocd
+spec:
+  description: LaunchPad deployment project
+  sourceRepos:
+    - https://github.com/rasram/launchpad-k8s
+  destinations:
+    - namespace: launchpad
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: '*'
+      kind: '*'
