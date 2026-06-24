@@ -1,0 +1,47 @@
+# Override values for kube-prometheus-stack.
+# Install with: helm install monitoring prometheus-community/kube-prometheus-stack \
+#   -f observability/prometheus-values.yaml
+
+grafana:
+  adminPassword: admin
+  defaultDashboardsEnabled: true
+  # Auto-load LaunchPad dashboards from a ConfigMap labelled grafana_dashboard.
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: launchpad
+          orgId: 1
+          folder: LaunchPad
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/launchpad
+  dashboardsConfigMaps:
+    launchpad: launchpad-grafana-dashboards
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespaces: ALL
+
+prometheus:
+  prometheusSpec:
+    # Scrape only LaunchPad ServiceMonitors that opt in via this label.
+    serviceMonitorSelector:
+      matchLabels:
+        app.kubernetes.io/part-of: launchpad
+    serviceMonitorNamespaceSelector: {}
+    retention: 7d
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+
+# KEDA exposes its metrics adapter; the kube-state-metrics shipped with the stack
+# provides kube_deployment_spec_replicas / kube_horizontalpodautoscaler_* series
+# used by the LaunchPad dashboard.
+kube-state-metrics:
+  metricLabelsAllowlist:
+    - deployments=[app,app.kubernetes.io/part-of]

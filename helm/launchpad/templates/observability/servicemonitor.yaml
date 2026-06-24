@@ -1,0 +1,26 @@
+{{- if .Values.observability.enabled }}
+{{- if .Values.observability.prometheusOperator }}
+# Tells the Prometheus Operator to scrape every LaunchPad service that exposes
+# /metrics. Selection is by the shared app.kubernetes.io/part-of: launchpad label,
+# which Prometheus' serviceMonitorSelector also matches (see prometheus-values.yaml).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: launchpad
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: launchpad
+    {{- include "launchpad.labels" . | nindent 4 }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: launchpad
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+{{- end }}
+{{- end }}
