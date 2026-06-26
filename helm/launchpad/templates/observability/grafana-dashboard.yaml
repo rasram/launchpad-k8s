@@ -1,0 +1,17 @@
+{{- if .Values.observability.enabled }}
+# Wraps the LaunchPad KEDA dashboard JSON in a ConfigMap. The grafana_dashboard
+# label makes the kube-prometheus-stack Grafana sidecar auto-import it (no UI clicks).
+# The JSON is injected verbatim with .Files.Get so Grafana's own double-brace {{`{{`}} legend syntax
+# is NOT interpreted by Helm.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: launchpad-grafana-dashboards
+  namespace: {{ .Release.Namespace }}
+  labels:
+    grafana_dashboard: "1"
+    {{- include "launchpad.labels" . | nindent 4 }}
+data:
+  launchpad-keda.json: |-
+{{ .Files.Get "dashboards/launchpad-keda.json" | indent 4 }}
+{{- end }}
